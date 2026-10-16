@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Format](https://img.shields.io/badge/vtt-%E2%86%92%20srt-blue)
+![Format](https://img.shields.io/badge/from%20.vtt-to%20.srt-blue)
 
 </div>
 
@@ -14,11 +14,13 @@
 
 ## A note from the author
 
-I had one episode with almost 25 subtitle languages, and every one of them was a `.vtt` file. My video player wouldn't load WebVTT subtitles, and I wanted them inside a single `.mkv`, which means they had to be `.srt` first.
+*I had one episode with almost 25 subtitle languages, and every one of them was a* `.vtt` *file. My video player wouldn't load* `WebVTT` *subtitles, and I wanted them inside a single* `.mkv`*, which means they had to be* `.srt` *first.*
 
-Converting 25 files by hand was not happening, so I wrote this. Point it at a folder, press Enter, and every `.vtt` comes out as an `.srt` with the same name.
+*Converting 25 files by hand was not happening, so I wrote this. Point it at a folder, press Enter, and every* `.vtt` *comes out as an* `.srt` *with the same name.*
 
-I wrote the first version myself and then had it checked against a pile of odd VTT files. It turned out my version only handled the one file I tested it on, so it has since been reworked to handle the VTT variations that exist in the wild, not just the ones I happened to have.
+*I wrote the first version myself and then had it checked against a pile of odd VTT files. It turned out my version only handled the one file I tested it on, so it has since been reworked to handle the VTT variations that exist in the wild, not just the ones I happened to have.*
+
+*For now I am uploading it in this folder but you can find the same file or usage in the* `sub_merger.py` *As at the end* `2srtconverter` *is a module of it, though that tool may go specific for specific task that's why I put the actual seperately here.*
 
 ---
 
