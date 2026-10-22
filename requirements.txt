@@ -1,0 +1,3 @@
+rich
+requests
+curl_cffi
