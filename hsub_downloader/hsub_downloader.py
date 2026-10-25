@@ -21,6 +21,7 @@ import json
 import re
 import shlex
 import sys
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html import unescape
@@ -30,7 +31,8 @@ from urllib.parse import urljoin, urlparse
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException, Timeout
-from rich.console import Console, Group
+from rich.box import ROUNDED
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -38,14 +40,17 @@ from rich.progress import (
 	DownloadColumn,
 	MofNCompleteColumn,
 	Progress,
+	ProgressColumn,
 	SpinnerColumn,
+	Task,
 	TaskID,
 	TaskProgressColumn,
 	TextColumn,
 	TimeRemainingColumn,
 	TransferSpeedColumn,
 )
-from rich.table import Column
+from rich.style import Style
+from rich.table import Column, Table
 from rich.text import Text
 
 # --- Custom Classes -----------------------------------------------------------
@@ -71,6 +76,11 @@ class Track:
 	url: str
 
 
+@dataclass(frozen=True)
+class Layout:
+	name: int  # width of the name column
+	bar: int  # width of the progress bar
+	gap: int  # spaces between the columns
 # --- Settings -----------------------------------------------------------------
 
 DOWNLOADS_DEFAULT = Path.home() / "Downloads" / "hsub_downloads"
@@ -122,6 +132,21 @@ How to copy the cURL from {browser}
 
 MAX_CONCURRENT = 4	# Downloads running at the same time
 
+ANSWER_STYLE = "bold bright_cyan"  # colour of what you type
+BAR_COLOR = "light_sky_blue1"  # "light blue" is not a rich colour name: rich raises MissingStyle
+URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>]*[^\s'\"<>.,;:!?)\]]")  # a link, minus trailing punctuation
+
+# Download panel. Fixed columns get fixed widths, so rows never jump around. The width that is
+# left goes to the names, then to the bar (BAR_MAX at most), then evenly between the columns.
+PERCENT_W = 4  # "100%"
+SIZE_W = 14  # "123.4/123.4 kB"
+ETA_W = 8  # "0:00:00"
+SPEED_W = 10  # "603.1 kB/s"
+ROW_COLUMNS = 7  # spinner, name, bar, percent, size, eta, speed
+PANEL_CHROME = 6  # two nested panels: borders 2 + 2, padding 0 + 2
+NAME_MIN = 10
+BAR_MIN, BAR_MAX = 20, 100
+
 # --- Output ------------------------------------------------------------------
 
 console = Console(highlight=False)
@@ -137,14 +162,38 @@ STYLES: dict[Level, str] = {
 _show_debug = False
 
 
-def log(level: Level, message: str) -> None:
-	"""Log isnt private"""
+def log(level: Level, *message: str | Path) -> None:
+	"""Print one tagged line. URLs, and Path objects, in it become clickable links.
+
+	soft_wrap: rich never cuts the line itself, so the terminal still sees every link whole.
+	"""
 	if level == "DEBUG" and not _show_debug:
 		return
-	console.print(Text(text=f"[{level:<7}] :", style=STYLES[level]).append(message, style=""))
+	line = Text(text=f"[{level:<7}] :", style=STYLES[level])
+	for number, part in enumerate(message):
+		if number:
+			line.append(" ")
+		if isinstance(part, Path):
+			line.append(str(part), style=Style(link=part.absolute().as_uri()))
+		else:
+			line.append(part, style="")
+	line.highlight_regex(URL_IN_TEXT, lambda url: Style(link=url))
+	console.print(line, soft_wrap=True)
 
 
-
+def ask(prompt: str = "") -> str:
+	"""input() with the typed answer coloured (ANSWER_STYLE). The prompt is printed by rich."""
+	console.print(Text(prompt), end="", soft_wrap=True)
+	start = stop = ""
+	if console.is_terminal and console.color_system:
+		start, stop = console.get_style(ANSWER_STYLE).render("\0").split("\0")
+	console.file.write(start)  # switch the terminal to the answer colour, then let the user type
+	console.file.flush()
+	try:
+		return input()
+	finally:
+		console.file.write(stop)
+		console.file.flush()
 # --- cURL ---------------------------------------------------------------------
 
 
@@ -262,7 +311,7 @@ def get(
 
 def find_playlist(page_html: str) -> str | None:
 	"""Return the .m3u8 playlist link of the video on a watch page, or None."""
-    # 1) schema.org VideoObject in a JSON-LD block (a standard place for it)
+	# 1) schema.org VideoObject in a JSON-LD block (a standard place for it)
 	for block in re.findall(
 		r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', page_html, flags=re.DOTALL
 	):
@@ -317,7 +366,14 @@ def plan_downloads(tracks: list[Track], stem: str) -> list[tuple[str,str]]:
 	return files
 
 
-def download_one(session: requests.Session, url: str, target: Path, headers: dict[str,str], jobs: Progress, task: TaskID) -> bool:
+def download_one(
+	session: requests.Session,
+	url: str,
+	target: Path,
+	headers: dict[str, str],
+	jobs: Progress,
+	task: TaskID,
+) -> bool:
 	"""Save one file. False if it was already there; raises Fatal or OSError on failure."""
 	if target.is_file() and target.stat().st_size > 0:
 		return False
@@ -350,48 +406,106 @@ def shorten(name: str, width: int = 28) -> str:
 	return name if len(name) <= width else "..." + name[-(width - 3) :]
 
 
+class GappedProgress(Progress):
+	"""A Progress with `gap` spaces between its columns (rich always uses 1)."""
+
+	def __init__(self, *columns: str | ProgressColumn, gap: int = 1) -> None:
+		self.gap = gap  # must be set first: rich draws a table inside super().__init__()
+		super().__init__(*columns)
+
+	def make_tasks_table(self, tasks: Iterable[Task]) -> Table:
+		table = super().make_tasks_table(tasks)
+		table.padding = (0, self.gap)
+		return table
+
+
+def compute_layout(width: int, longest: int) -> Layout:
+	"""Share the console width out between the columns of a download row.
+
+	Order: names first (up to the longest name), then the bar (up to BAR_MAX), and whatever
+	is still left is spread evenly over the gaps between the columns.
+	"""
+	gaps = ROW_COLUMNS - 1
+	free = width - PANEL_CHROME - (1 + PERCENT_W + SIZE_W + ETA_W + SPEED_W) - gaps
+	name = max(NAME_MIN, min(longest, free - BAR_MIN))
+	bar = max(5, min(BAR_MAX, free - name))
+	spare = max(0, free - name - bar)
+	return Layout(name=name + spare % gaps, bar=bar, gap=1 + spare // gaps)
+
+
+def make_progress(layout: Layout, *columns: ProgressColumn, name_style: str = "") -> Progress:
+	"""A Progress whose first four columns come from `layout`, then `columns`.
+
+	Every Progress made here has the same widths, so their rows line up with each other.
+	"""
+	return GappedProgress(
+		SpinnerColumn(style="bold green", finished_text="✓"),
+		TextColumn(
+			"{task.description}",
+			markup=False,
+			style=name_style,
+			justify="right",
+			table_column=Column(width=layout.name, no_wrap=True, justify="right"),
+		),
+		BarColumn(bar_width=layout.bar, complete_style=BAR_COLOR, finished_style=BAR_COLOR),
+		TaskProgressColumn(table_column=Column(width=PERCENT_W, justify="right")),
+		*columns,
+		gap=layout.gap,
+	)
+
+
+def downloads_panel(content: RenderableType) -> Panel:
+	"""Two rounded panels, one inside the other: a rounded *double* border.
+
+	(rich's own double box has sharp corners, and there is no rounded double box.)
+	"""
+	inner = Panel(content, box=ROUNDED, border_style="bright_cyan", padding=(0, 1))
+	return Panel(
+		inner,
+		title="Downloads",
+		title_align="left",
+		box=ROUNDED,
+		style="bright_cyan",
+		border_style="bright_cyan",
+		padding=0,
+	)
+
+
 def download_all_progress(
 	session: requests.Session,
 	files: list[tuple[str, str]],
 	dest_dir: Path,
-	headers: dict[str,str],
+	headers: dict[str, str],
 ):
+	layout = compute_layout(console.width, max(len(name) for name, _ in files))
 	# Progress object only for jobs
-	jobs = Progress(
-		SpinnerColumn(style="bold green", finished_text="✓"),
-		TextColumn("{task.description}", markup=False, table_column=Column(width=32, no_wrap=True)),
-		BarColumn(bar_width=20, complete_style="light blue", finished_style="light blue"),
-		TaskProgressColumn(),
-		DownloadColumn(),
-		TimeRemainingColumn(),
-		TransferSpeedColumn(),
+	jobs = make_progress(
+		layout,
+		DownloadColumn(table_column=Column(width=SIZE_W, justify="right")),
+		TimeRemainingColumn(table_column=Column(width=ETA_W, justify="right")),
+		TransferSpeedColumn(table_column=Column(width=SPEED_W, justify="right")),
 	)
-	overall = Progress(
-		SpinnerColumn(style="bold green", finished_text="✓"),
-		TextColumn("Total", markup=False, style="bold", table_column=Column(width=32, no_wrap=True)),
-		BarColumn(bar_width=20, complete_style="light blue", finished_style="light blue"),
-		TaskProgressColumn(),
-		MofNCompleteColumn(),
-	)
+	overall = make_progress(layout, MofNCompleteColumn(), name_style="bold")
 	total_task = overall.add_task(description="Total", total=len(files))
 
-	def work(file): # This starts one job and calls the download_one()
+	def work(file):  # This starts one job and calls the download_one()
 		name, url = file
-		task = jobs.add_task(shorten(name), total=None)
+		task = jobs.add_task(shorten(name, layout.name), total=None)
 		try:
 			downloaded = download_one(session, url, dest_dir / name, headers, jobs, task)
 		except (Fatal, OSError) as err:
 			# This is not a fatal error so we wont call Raise Fatal
 			log("ERROR", f"{name}: {err}")
 			outcome = "failed"
-		else: 
+		else:
 			outcome = "saved" if downloaded else "present"
 		if outcome != "saved":
 			jobs.remove_task(task)
 		overall.advance(total_task)
 		return outcome
 
-	with Live(Panel(Group(jobs, overall), title="Donwloads", style="bright_cyan", border_style="bright_cyan", title_align="left"), console=console):  # noqa: SIM117
+	# vertical_overflow="visible": a long list keeps growing instead of being cut with "..."
+	with Live(downloads_panel(Group(jobs, overall)), console=console, vertical_overflow="visible"):  # noqa: SIM117
 		with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
 			results = list(pool.map(work, files))
 
@@ -405,7 +519,7 @@ def download_all_progress(
 
 
 def confirm(question: str, *, default: bool) -> bool:
-	answer = input(f"{question} {'[Y/n]' if default else '[y/N]'} ").strip().lower()
+	answer = ask(f"{question} {'[Y/n]' if default else '[y/N]'} ").strip().lower()
 	return default if not answer else answer.startswith("y")
 
 
@@ -416,7 +530,7 @@ def is_http_url(url: str) -> bool:
 
 def ask_url() -> str:
 	while True:
-		url = input("Episode page link: ").strip().strip("\"'")
+		url = ask("Episode page link: ").strip().strip("\"'")
 		if is_http_url(url):
 			return url
 		log("ERROR", "That is not a full link. It should start with https://")
@@ -424,14 +538,14 @@ def ask_url() -> str:
 
 def ask_browser() -> str:
 	while True:
-		answer = input(f"Browser the page is open in ({'/'.join(BROWSERS)}): ").strip().lower()
+		answer = ask(f"Browser the page is open in ({'/'.join(BROWSERS)}): ").strip().lower()
 		if answer in BROWSERS:
 			return answer
 		log("ERROR", f"Please choose one of: {', '.join(BROWSERS)} (Chromium isn't supported yet).")
 
 
 def ask_path(question: str, default: Path) -> Path:
-	answer = input(f"{question}\n  [{default}] > ").strip().strip("\"'")
+	answer = ask(f"{question}\n  [{default}] > ").strip().strip("\"'")
 	return Path(answer).expanduser() if answer else default
 
 
@@ -500,20 +614,18 @@ def run(args: argparse.Namespace) -> int:
 			raise Fatal("No .m3u8 playlist link found in the page. Is it an episode page?")
 		log("DEBUG", f"playlist: {playlist_url}")
 		# The playlist and the files live on another domain. They get the User-Agent and a
-        # Referer only: the site's cookies are never sent anywhere else.
-		
+		# Referer only: the site's cookies are never sent anywhere else.
 		site = urlparse(request.url)
 		other_headers = {"Referer": f"{site.scheme}://{site.netloc}/"}
 		if user_agent := request.headers.get("user-agent"):
 			other_headers["User-Agent"] = user_agent
 
 		playlist = get(
-            session,
-            playlist_url,
-            headers=other_headers,
-            hint="The playlist server may want a different Referer.",
-        )
-
+			session,
+			playlist_url,
+			headers=other_headers,
+			hint="The playlist server may want a different Referer.",
+		)
 		tracks = parse_subtitle_tracks(playlist.text, playlist_url)
 		files = plan_downloads(tracks, stem)
 		log("INFO", f"Found {len(tracks)} subtitle track(s), {len(files)} usable.")
@@ -524,21 +636,20 @@ def run(args: argparse.Namespace) -> int:
 
 	missing = [name for name, _ in files if not (subs_dir / name).is_file()]
 	log("INFO", f"Saved {len(saved)}, already there {len(present)}, failed {len(failed)}.")
-	log("INFO", f"Subtitles folder: {subs_dir}")
+	log("INFO", "Subtitles folder:", subs_dir)
 	if missing:
 		log("WARN", f"Missing files: {', '.join(missing)}")
-		log("INFO", f"The saved cURL was kept ({curl_file}); run again to retry them.")
+		log("INFO", "The saved cURL was kept:", curl_file, "- run again to retry the missing files.")
 		return 1
 	curl_file.unlink(missing_ok=True)
 	log("OK", "Every subtitle file is on disk. The saved cURL file was deleted.")
 	return 0
 
 
-
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Download every subtitle track of one episode page of this specific site.")
 	parser.add_argument('--url', nargs='?', help="episode page link (asked for if left out)")
-	parser.add_argument('--debug', action='store_true', help="store extra detail")
+	parser.add_argument('--debug', action='store_true', help="show extra detail")
 	parser.add_argument("--no-guide", action="store_true", help="Use this argument to skip guide asks. This will skip showing guides.")
 	return parser.parse_args()
 
