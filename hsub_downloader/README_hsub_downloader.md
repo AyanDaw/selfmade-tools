@@ -196,7 +196,7 @@ This is a small tool built for one job, and it shows. Be aware of these:
 - **The cURL expires.** Browser checks hand out cookies that don't last forever, so after a while you need to copy a fresh one.
 - **Plain `.vtt` tracks only.** Subtitles split into many segments are skipped.
 - **Subtitles only.** The video is not downloaded.
-- **Developed on Arch Linux.** Not tested on Windows or macOS.
+- **Developed on Arch Linux. Also runs on Windows (Powershell)** Not tested on macOS.
 - **Needs a terminal with colour.** The panel and the link support assume a normal modern terminal. Below about 70 columns the panel gets cramped.
 
 Use it only on pages you can already open normally in your own browser.

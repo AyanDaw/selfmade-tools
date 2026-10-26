@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# personal output of my tools
+*.mkv
+log.txt
+links.txt
+metadata*.json
+Queuestatus.json
+STOP_MONITORS
+*_curl.txt
+*.part
