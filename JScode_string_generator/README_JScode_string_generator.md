@@ -47,10 +47,10 @@ python JScode_string_generator.py
 Then:
 
 1. **Enter the URL** of a file when prompted.
-2. **Enter a filename.** `.pdf` is added automatically if you leave it off.
+2. **Enter a filename.** `.pdf` is added automatically if you leave it off. Characters Windows doesn't allow in file names (`< > : " / \ | ? *`) become spaces, reserved names like `CON` or `NUL` get an `_` in front, and leading or trailing dots and spaces are removed.
 3. Repeat for as many files as you like.
 4. Type **`x`** at the URL prompt when you're finished.
-5. The screen clears and prints only the code between two `=` lines. Copy it from there.
+5. The screen clears again and prints only the code between two `=` lines. Copy it from there.
 
 ### Example session
 
@@ -71,17 +71,23 @@ const items = [
 { url: "https://example.com/files/doc2", file: "Lecture 2.pdf" }
 ];
 
-for (const item of items) {
-fetch(item.url)
-  .then(r => r.blob())
-  .then(blob => {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = item.file;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  });
-}
+console.log("Starting Downloads...")
+const jobs = items.map(item =>
+  fetch(item.url)
+    .then(r => r.blob())
+    .then(blob => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = item.file;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    })
+    .catch(err => console.error("Failed:", item.file, err))
+);
+Promise.all(jobs).then(() => {
+  console.log("All files fetched and handed to the browser.\n")
+  console.log("Check your browser's downloads list to make sure every file finished saving.")
+});
 ```
 
 ## Using the generated code
@@ -107,7 +113,7 @@ flowchart LR
     F --> G[Files appear in Downloads]
 ```
 
-The download loop is the fixed template: for each item it fetches the URL, turns the response into a blob, and triggers a browser download under the filename you chose.
+The download part is the fixed template: for each item it fetches the URL, turns the response into a blob, and triggers a browser download under the filename you chose. A file that fails is reported in the console as `Failed: <file>` and the others carry on. The closing messages appear only after every file has been fetched.
 
 ## Known quirks
 
@@ -115,6 +121,7 @@ The download loop is the fixed template: for each item it fetches the URL, turns
 - **Quotes and backslashes are escaped for you**, so odd characters in URLs or filenames won't break the generated JavaScript.
 - **It only generates code.** If the site changes how it works, the snippet may stop working and need adjusting.
 - **Downloads fire all at once.** Large batches may be throttled or blocked by the browser.
+- **The closing message means every file was fetched and handed to the browser to save.** Each file is held in memory first, then the browser writes it to disk in the background, and a page's JavaScript can't tell when that finishes. Check your browser's downloads list (`Ctrl+J`) to be sure.
 
 ## Is it useful?
 
