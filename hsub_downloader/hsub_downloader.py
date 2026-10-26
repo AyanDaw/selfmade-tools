@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 import shlex
+import subprocess
 import sys
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -98,6 +99,7 @@ EXT_X_MEDIA = "#EXT-X-MEDIA:"
 ATTR = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 
 _show_guide = True
+_browser_arg: str | None = None  # --browser value, used once by ask_browser()
 
 GUIDE = """\
 1. What it does?
@@ -169,7 +171,7 @@ def log(level: Level, *message: str | Path) -> None:
 	"""
 	if level == "DEBUG" and not _show_debug:
 		return
-	line = Text(text=f"[{level:<7}] :", style=STYLES[level])
+	line = Text(text=f"[{level:<7}] : ", style=STYLES[level])
 	for number, part in enumerate(message):
 		if number:
 			line.append(" ")
@@ -181,9 +183,16 @@ def log(level: Level, *message: str | Path) -> None:
 	console.print(line, soft_wrap=True)
 
 
-def ask(prompt: str = "") -> str:
+def clear_screen() -> None:
+	"""Wipe the terminal, unless --debug is on (then the extra detail would be lost)."""
+	if console.is_terminal and not _show_debug:
+		subprocess.run("cls" if sys.platform == "win32" else "clear", check=False, shell=True)
+		console.rule(Text(Path(__file__).name))
+
+
+def ask(prompt: Text) -> str:
 	"""input() with the typed answer coloured (ANSWER_STYLE). The prompt is printed by rich."""
-	console.print(Text(prompt), end="", soft_wrap=True)
+	console.print(prompt, end="", soft_wrap=True)
 	start = stop = ""
 	if console.is_terminal and console.color_system:
 		start, stop = console.get_style(ANSWER_STYLE).render("\0").split("\0")
@@ -246,9 +255,12 @@ def parse_curl(text: str) -> CurlRequest:
 
 
 def paste_curl(curl_file: Path, page_url: str) -> CurlRequest:
+	browser = ask_browser()
+	clear_screen()
 	if _show_guide and confirm("Show how to copy the cURL?", default=True):
-		browser = ask_browser()
 		console.print(Text(CURL_GUIDE.format(browser=browser, path=urlparse(page_url).path)))
+		input("Press 'enter' to continue...")
+	clear_screen()
 	log('INFO', "Paste the cURL now:")
 	while True:
 		text = read_pasted_curl()
@@ -257,12 +269,13 @@ def paste_curl(curl_file: Path, page_url: str) -> CurlRequest:
 			break
 		except Fatal as err:
 			log('ERROR', f"{err} Paste it again:")
+	clear_screen()
 	try:
 		curl_file.write_text(text, encoding="utf-8") # Storing the whole curl file here so using text instead of request
 		curl_file.chmod(0o600) # it holds live cookies: keep it private, although here it is not needed.
 	except OSError as err:
 		raise Fatal(f"Could not save {curl_file}: {err}") from err
-	log('OK', f"cURL saved: {curl_file}")
+	log('OK', "cURL saved:", curl_file)
 	return request
 
 
@@ -439,7 +452,7 @@ def make_progress(layout: Layout, *columns: ProgressColumn, name_style: str = ""
 	Every Progress made here has the same widths, so their rows line up with each other.
 	"""
 	return GappedProgress(
-		SpinnerColumn(style="bold green", finished_text="✓"),
+		SpinnerColumn(style="bold green", finished_text=Text("✓", style="bold green")),
 		TextColumn(
 			"{task.description}",
 			markup=False,
@@ -485,7 +498,12 @@ def download_all_progress(
 		TimeRemainingColumn(table_column=Column(width=ETA_W, justify="right")),
 		TransferSpeedColumn(table_column=Column(width=SPEED_W, justify="right")),
 	)
-	overall = make_progress(layout, MofNCompleteColumn(), name_style="bold")
+	overall = make_progress(
+		layout,
+		MofNCompleteColumn(table_column=Column(width=SIZE_W, justify="right")),
+		TextColumn("items", table_column=Column(width=ETA_W)),
+		name_style="bold",
+	)
 	total_task = overall.add_task(description="Total", total=len(files))
 
 	def work(file):  # This starts one job and calls the download_one()
@@ -519,7 +537,7 @@ def download_all_progress(
 
 
 def confirm(question: str, *, default: bool) -> bool:
-	answer = ask(f"{question} {'[Y/n]' if default else '[y/N]'} ").strip().lower()
+	answer = ask(Text(f"{question} {'[Y/n]' if default else '[y/N]'} ", style="")).strip().lower()
 	return default if not answer else answer.startswith("y")
 
 
@@ -530,22 +548,33 @@ def is_http_url(url: str) -> bool:
 
 def ask_url() -> str:
 	while True:
-		url = ask("Episode page link: ").strip().strip("\"'")
+		url = ask(Text("Episode page link: ")).strip().strip("\"'")
 		if is_http_url(url):
 			return url
 		log("ERROR", "That is not a full link. It should start with https://")
 
 
 def ask_browser() -> str:
+	global _browser_arg
+	given, _browser_arg = _browser_arg, None  # only the first question can be skipped
+	if given is not None:
+		if given.strip().lower() in BROWSERS:
+			return given.strip().lower()
+		log("WARN", f"--browser {given!r} is not one of: {', '.join(BROWSERS)}. Asking instead.")
 	while True:
-		answer = ask(f"Browser the page is open in ({'/'.join(BROWSERS)}): ").strip().lower()
+		prompt = Text(f"Browser the page is open in ({'/'.join(BROWSERS)}): ")
+		typed = ask(prompt)
+		answer = typed.strip().lower()
+		if console.is_terminal and console.color_system:  # redraw the line: green if valid, red if not
+			console.file.write("\x1b[1A\x1b[2K")
+			console.print(prompt + Text(typed, style="green" if answer in BROWSERS else "red"))
 		if answer in BROWSERS:
 			return answer
 		log("ERROR", f"Please choose one of: {', '.join(BROWSERS)} (Chromium isn't supported yet).")
 
 
 def ask_path(question: str, default: Path) -> Path:
-	answer = ask(f"{question}\n  [{default}] > ").strip().strip("\"'")
+	answer = ask(Text(f"{question}\n  [ ' {default} ' ] > ", style="grey50")).strip().strip("\"'")
 	return Path(answer).expanduser() if answer else default
 
 
@@ -581,6 +610,8 @@ def same_page(a: str, b: str) -> bool:
 
 def run(args: argparse.Namespace) -> int:
 	console.rule(Text(Path(__file__).name))
+	clear_screen()
+
 	if _show_guide and confirm("Show the guide?", default=False):
 		console.print(Text(GUIDE.format(subs=SUBTITLES_DEFAULT, cookies=COOKIES_FOLDER_DEFAULT)))
 
@@ -649,6 +680,7 @@ def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Download every subtitle track of one episode page of this specific site.")
 	parser.add_argument('--url', nargs='?', help="episode page link (asked for if left out)")
+	parser.add_argument('--browser', help=f"browser the page is open in ({'/'.join(BROWSERS)}); asked for if left out")
 	parser.add_argument('--debug', action='store_true', help="show extra detail")
 	parser.add_argument("--no-guide", action="store_true", help="Use this argument to skip guide asks. This will skip showing guides.")
 	return parser.parse_args()
@@ -657,9 +689,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
 	global _show_debug
 	global _show_guide
+	global _browser_arg
 	args = parse_args()
 	_show_debug = args.debug
 	_show_guide = not args.no_guide
+	_browser_arg = args.browser
 	try:
 		return run(args)
 	except Fatal as err:

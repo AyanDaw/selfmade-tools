@@ -28,11 +28,12 @@ It does one thing, for one site. It isn't clever. It just does that one thing fo
 
 - Opens the episode page using **your own browser session** (a "Copy as cURL" from your browser)
 - Finds the video's playlist in the page and reads the list of subtitle tracks from it
-- Downloads every usable track, **4 at a time**, with live progress bars
+- Downloads every usable track, **4 at a time**, with a live progress panel (one row per file, plus a **Total** row)
 - Saves each one as `<episode>.<lang>.vtt`, so the language tag stays in the file name
 - Checks that each downloaded file really is a WebVTT subtitle, and not an error page
 - Can **continue after a stop**: the cURL is kept in a small file until every subtitle is on disk
 - Tells you in plain words what went wrong, and what to do about it
+- Colours what you type, and makes the links and folders it prints clickable (if your terminal supports it)
 
 It does **not** download the video, log in for you, or touch the ad or the player. It only reads the page you already opened in your own browser.
 
@@ -70,17 +71,41 @@ Folder to save the subtitles into
 Folder to keep the saved cURL file in
   [/home/me/Downloads/hsub_downloads/cookies] >
 Show how to copy the cURL? [Y/n] n
-[INFO   ] :Paste the cURL now:
+[INFO   ] : Paste the cURL now:
 curl 'https://sanctuary.example/watch/some-series/episode-4/' -H 'User-Agent: ...' ...
-[OK     ] :cURL saved: /home/me/Downloads/hsub_downloads/cookies/some-series episode-4_curl.txt
-[INFO   ] :Found 25 subtitle track(s), 25 usable.
-(progress bars while the files download)
-[INFO   ] :Saved 25, already there 0, failed 0.
-[INFO   ] :Subtitles folder: /home/me/Downloads/hsub_downloads/subtitles/some-series episode-4
-[OK     ] :Every subtitle file is on disk. The saved cURL file was deleted.
+[OK     ] : cURL saved: /home/me/Downloads/hsub_downloads/cookies/some-series episode-4_curl.txt
+[INFO   ] : Found 25 subtitle track(s), 25 usable.
+╭─ Downloads ───────────────────────────────────────────────────────────────────────╮
+│╭─────────────────────────────────────────────────────────────────────────────────╮│
+││ ✓ some-series-episode-4.ar.vtt ━━━━━━━━━━━━━━━━━━━━  100%   1.7/1.7 kB  0:00:00 ││
+││ ⠋ some-series-episode-4.en.vtt ━━━━━━━━━━╸━━━━━━━━━   55%   0.9/1.7 kB  0:00:01 ││
+││ ⠋                        Total ━━━━━╸━━━━━━━━━━━━━━   28%  7/25                 ││
+│╰─────────────────────────────────────────────────────────────────────────────────╯│
+╰───────────────────────────────────────────────────────────────────────────────────╯
+[INFO   ] : Saved 25, already there 0, failed 0.
+[INFO   ] : Subtitles folder: /home/me/Downloads/hsub_downloads/subtitles/some-series episode-4
+[OK     ] : Every subtitle file is on disk. The saved cURL file was deleted.
 ```
 
 Press Enter at the two folder questions to accept the defaults.
+
+## The progress panel
+
+While the files download, a rounded double-border panel shows one row per running file and a **Total** row (`7/25`) at the bottom. That Total row is the real progress. Each file row is only that one file, and these files are tiny, so they often fill up and vanish within a moment.
+
+Each row has: a spinner (a tick when done), the file name, a bar, a percentage, the size, the time left and the speed. A `?` as the size means the server didn't say how big the file is.
+
+- **It fills your terminal's width.** Names get the room first (up to the longest name), then the bar (never more than 100 characters), and whatever is left is spread evenly between the columns, so the rows stay lined up.
+- **A long list keeps growing** instead of being cut with `...`.
+- **Narrow terminals work down to about 70 columns.** The names shrink first (and are shortened with `...`), then the bar.
+- The layout is worked out once, when the downloads start. Resizing the window mid-download won't re-flow it.
+- If the list is taller than your terminal, the rows that scrolled off the top can't be redrawn, so the live view may look repeated. The finished list is correct.
+
+## Clickable links and folders
+
+The URLs and folder paths printed in the messages are real terminal links (OSC 8). Ctrl+click (or just click, depending on the terminal) opens them. This depends on your terminal: Konsole and Kitty support it, and a terminal that doesn't will just show plain text.
+
+What you type at the questions is shown in a different colour. This is skipped automatically when the output isn't a terminal (for example when piped to a file).
 
 ## How to copy the cURL
 
@@ -89,16 +114,17 @@ The script can show these steps itself (answer **Y** to "Show how to copy the cU
 1. Open the episode page in your browser, then press **F12** to open the dev tools.
 2. Open the **Network** tab (look under `>>` if you can't see it) and **reload the page**. Make sure no filter is active.
 3. Find the row whose File is the episode's path, with Initiator `Document` and Type `html`.
-4. Right-click it, then **Copy Value**, then **Copy as cURL** (the POSIX one, if you get a choice).
+4. Right-click it, then **Copy Value**, then **Copy as cURL** (**POSIX**). On Windows the browser may offer **Copy as cURL (Windows)**; don't use it. Only the POSIX format (single quotes, lines ending in `\`) is accepted, and the Windows one (`curl.exe` with `^` characters) is rejected as "not a cURL command".
 5. Paste it into the terminal when the script asks. A multi-line paste is fine.
 
-If the pasted text isn't a usable cURL command, the script says so and asks again.
+If the pasted text isn't a usable cURL command, the script says so and asks again. The screen is cleared before and after the paste (not when `--debug` is on), so the long pasted text doesn't stay in front of you.
 
 ## Options
 
 | Option | What it does |
 |---|---|
 | `--url LINK` | Episode page link. If left out, you are asked for it. |
+| `--browser NAME` | The browser the page is open in (`zen` or `firefox`). If it is right, the browser question in the cURL guide is skipped. If it is wrong, you get a warning and are asked as usual. |
 | `--debug` | Shows extra detail: the page status, the playlist link, and the header and cookie **names** (never their values). |
 | `--no-guide` | Skips the "Show the guide?" and "Show how to copy the cURL?" questions. |
 
@@ -158,7 +184,7 @@ Exit codes: `0` everything saved, `1` an error or missing files, `130` stopped b
 
 ## Your cookies stay with the site
 
-The cookies from your cURL are sent **only to the site itself**. The playlist and the subtitle files live on a different server, and that server only receives a User-Agent and a Referer. Nothing else leaves.
+The cookies from your cURL are sent **only to the site itself**. The playlist and the subtitle files live on a different server, and that server only receives a User-Agent and a Referer. Nothing else leaves. Also I noticed the cookies get expired after 30 minutes.
 
 ## Known limitations
 
@@ -171,7 +197,7 @@ This is a small tool built for one job, and it shows. Be aware of these:
 - **Plain `.vtt` tracks only.** Subtitles split into many segments are skipped.
 - **Subtitles only.** The video is not downloaded.
 - **Developed on Arch Linux.** Not tested on Windows or macOS.
-- **Convert before most players.** Many players, VLC included, don't load `.vtt` files directly, so you may need to convert them to `.srt` first.
+- **Needs a terminal with colour.** The panel and the link support assume a normal modern terminal. Below about 70 columns the panel gets cramped.
 
 Use it only on pages you can already open normally in your own browser.
 
